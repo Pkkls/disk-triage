@@ -1,5 +1,7 @@
 # disk-triage
 
+[![ci](https://github.com/Pkkls/disk-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/Pkkls/disk-triage/actions/workflows/ci.yml)
+
 Two read-only scripts for a download folder that got out of hand. Standard library only, no dependencies, nothing is ever deleted.
 
 ## dirmap.py
