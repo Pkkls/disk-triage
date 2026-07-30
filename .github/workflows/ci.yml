@@ -1,0 +1,33 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: dirmap selftest
+        run: python dirmap.py --selftest
+      - name: dupescan selftest
+        run: python dupescan.py --selftest
+      # These scripts walk other people's directories, so a crash on an
+      # unreadable path or an odd filename is the failure mode that matters.
+      - name: Runs against a real tree without crashing
+        run: |
+          python dirmap.py . --out map.html
+          python dupescan.py . --min-mb 0.001
