@@ -6,6 +6,7 @@ Usage: python dirmap.py [root] [--out map.html]
 import argparse
 import html
 import os
+import re
 import subprocess
 import sys
 import time
@@ -53,7 +54,12 @@ def kind(path):
 
 
 def git_state(path):
-    """Returns (branch, last commit, modified file count), or None if not a repo."""
+    """Inspects a checkout. Returns a dict, or None if this is not a repo.
+
+    Beyond "is it dirty", the interesting question is what has never left this
+    disk: commits with no upstream to compare against, or ahead of one. That
+    work is gone if the drive is.
+    """
     # In a worktree or a submodule, .git is a file pointing elsewhere, not a
     # directory. Checking for a directory hides exactly the checkouts most
     # likely to be holding uncommitted work.
@@ -70,10 +76,58 @@ def git_state(path):
             return ""
         return out.stdout.strip() if out.returncode == 0 else ""
 
-    branch = run("rev-parse", "--abbrev-ref", "HEAD") or "?"
-    last = run("log", "-1", "--format=%cs %s")
-    dirty = run("status", "--porcelain")
-    return branch, last[:90], len(dirty.splitlines()) if dirty else 0
+    # One call covers branch, upstream tracking and dirty files.
+    status = run("status", "--porcelain=v1", "-b").splitlines()
+    header = status[0] if status and status[0].startswith("##") else ""
+    dirty = len([line for line in status[1:] if line.strip()])
+
+    branch = "?"
+    ahead = 0
+    has_upstream = False
+    if header:
+        head = header[2:].strip()
+        # Shapes: "main...origin/main [ahead 2, behind 1]", "main", "No commits yet on main"
+        tracking = re.match(r"(?:No commits yet on )?([^\s.]+)(\.\.\.(\S+))?(?:\s+\[(.+)\])?$", head)
+        if tracking:
+            branch = tracking.group(1)
+            has_upstream = bool(tracking.group(3))
+            counts = tracking.group(4) or ""
+            match = re.search(r"ahead (\d+)", counts)
+            if match:
+                ahead = int(match.group(1))
+
+    has_remote = bool(run("remote"))
+    if not has_upstream:
+        # Without an upstream, ahead is not measurable. Counting the whole
+        # history as unpushed reads as alarming when the branch may in fact be
+        # behind its remote, so only a repo with no remote at all is treated as
+        # living solely on this disk.
+        ahead = 0
+    commits = run("rev-list", "--count", "HEAD")
+
+    return {
+        "branch": branch,
+        "last": run("log", "-1", "--format=%cs %s")[:90],
+        "dirty": dirty,
+        "ahead": ahead,
+        "commits": int(commits) if commits.isdigit() else 0,
+        "has_remote": has_remote,
+        "has_upstream": has_upstream,
+    }
+
+
+def risk(git):
+    """What is at stake here, as (label, count), or None.
+
+    Only two situations mean work exists nowhere else: a repo with no remote at
+    all, and commits measurably ahead of an upstream. A branch with no upstream
+    but a configured remote is merely untracked, which says nothing either way.
+    """
+    if not git["has_remote"] and git["commits"]:
+        return "no remote", git["commits"]
+    if git["has_upstream"] and git["ahead"]:
+        return "unpushed", git["ahead"]
+    return None
 
 
 def pitch(path):
@@ -120,6 +174,7 @@ td.n{{text-align:right;font-variant-numeric:tabular-nums}}
 .desc{{color:#888;font-size:12px;max-width:38ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .commit{{color:#999;font-size:12px;max-width:44ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .dirty{{color:#d87;font-size:12px}}.nogit{{color:#555}}
+.risk{{color:#e55;font-size:12px;font-weight:600}}
 </style>
 <h1>{title}</h1><p>{summary}</p>
 <table><thead><tr>
@@ -167,11 +222,16 @@ def render(root, entries):
         cls = "cold" if days > 90 else "hot"
 
         if git:
-            branch, last, dirty = git
-            git_cell = html.escape(branch)
-            if dirty:
-                git_cell += f' <span class="dirty">{dirty} changed</span>'
-            commit = html.escape(last) or "-"
+            git_cell = html.escape(git["branch"])
+            if git["dirty"]:
+                git_cell += f' <span class="dirty">{git["dirty"]} changed</span>'
+            at_risk = risk(git)
+            if at_risk:
+                label, count = at_risk
+                git_cell += f' <span class="risk">{count} {label}</span>'
+            elif git["has_remote"] and not git["has_upstream"]:
+                git_cell += ' <span class="dirty">untracked branch</span>'
+            commit = html.escape(git["last"]) or "-"
         else:
             git_cell, commit = '<span class="nogit">-</span>', ""
 
@@ -188,11 +248,13 @@ def render(root, entries):
         )
     total = sum(e[2] for e in entries)
     stale = sum(1 for e in entries if (now - e[4]) / 86400 > 90)
-    repos = sum(1 for e in entries if e[5])
-    dirty = sum(1 for e in entries if e[5] and e[5][2])
+    gits = [e[5] for e in entries if e[5]]
+    dirty = sum(1 for g in gits if g["dirty"])
+    exposed = [g for g in gits if risk(g)]
     summary = (
         f"{len(entries)} directories, {human(total)} total, "
-        f"{repos} git repos of which {dirty} hold uncommitted work, "
+        f"{len(gits)} git repos of which {dirty} hold uncommitted work and "
+        f"{len(exposed)} hold commits that exist nowhere else, "
         f"{stale} untouched for 90+ days (greyed out)."
     )
     return PAGE.format(title=html.escape(root), summary=summary, rows="\n".join(rows))
@@ -247,11 +309,43 @@ def _selftest():
 
         state = git_state(repo)
         assert state is not None, "a repo must be detected"
-        branch, last, dirty = state
-        assert branch and branch != "?", branch
-        assert "first pass" in last, last
-        assert dirty == 1, dirty
+        assert state["branch"] and state["branch"] != "?", state
+        assert "first pass" in state["last"], state
+        assert state["dirty"] == 1, state
+        # No remote at all: the single commit exists only on this disk.
+        assert state["has_remote"] is False, state
+        assert risk(state) == ("no remote", 1), risk(state)
         assert "first pass" in render(d, build(d))
+
+        # With a remote and everything pushed, nothing is at risk.
+        origin = os.path.join(d, "origin.git")
+        subprocess.run(("git", "init", "-q", "--bare", origin), capture_output=True, env=env)
+        run("remote", "add", "origin", origin)
+        run("push", "-q", "-u", "origin", "HEAD")
+        pushed = git_state(repo)
+        assert pushed["has_remote"] and pushed["has_upstream"], pushed
+        assert risk(pushed) is None, f"everything is pushed: {pushed}"
+
+        # One more local commit: measurably ahead, and that one is only here.
+        open(os.path.join(repo, "c.txt"), "w").write("later")
+        run("add", "-A")
+        run("commit", "-qm", "local only")
+        ahead = git_state(repo)
+        assert risk(ahead) == ("unpushed", 1), risk(ahead)
+        assert "unpushed" in render(d, build(d)), "the risk must be visible in the report"
+
+        # A branch with a remote but no upstream says nothing about what is
+        # pushed: it may even be behind. Calling that "unpushed" cried wolf on a
+        # real repo, so it must stay out of the risk list.
+        run("checkout", "-qb", "side")
+        open(os.path.join(repo, "d.txt"), "w").write("on a side branch")
+        run("add", "-A")
+        run("commit", "-qm", "side work")
+        side = git_state(repo)
+        assert side["has_remote"] and not side["has_upstream"], side
+        assert risk(side) is None, f"an untracked branch is not proof of anything: {side}"
+        assert "untracked branch" in render(d, build(d))
+        run("checkout", "-q", "-")
 
         # In a worktree .git is a file, not a directory. These are the checkouts
         # most likely to hold uncommitted work, so they must not read as "no repo".
@@ -262,7 +356,12 @@ def _selftest():
             assert os.path.isfile(os.path.join(wt, ".git")), "expected .git to be a file here"
             wt_state = git_state(wt)
             assert wt_state is not None, "a worktree must be detected as a repo"
-            assert "first pass" in wt_state[1], wt_state
+            assert wt_state["last"], wt_state
+            assert wt_state["commits"] > 0, wt_state
+            # A fresh worktree branch tracks nothing. It inherits the repo's
+            # remote, so its history is not stranded and it is not a risk.
+            assert wt_state["has_upstream"] is False, wt_state
+            assert risk(wt_state) is None, wt_state
 
         # An unreadable directory must not take down the whole report.
         assert pitch(os.path.join(d, "does-not-exist")) == ""
