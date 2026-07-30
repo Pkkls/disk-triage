@@ -42,12 +42,28 @@ Matched values are never printed in full, only a masked prefix and a length: a s
 
 Only high-confidence patterns are included. Rules like "32 hex characters" match commit hashes and minified assets, and a scanner that cries wolf is one nobody runs.
 
+## notecheck.py
+
+Audits a directory of markdown notes: wiki links pointing at nothing, a `name:` that drifted from its filename, filesystem paths to things that moved, credentials pasted into a note.
+
+```sh
+python notecheck.py ~/notes
+python notecheck.py ~/notes --index README.md
+```
+
+Written for an agent's own memory directory, but the failure modes are the same in any Obsidian vault or Zettelkasten. None of them break anything, which is why they rot: a dead link does not error, it just never delivers the context it promises. Run on a real vault it found 28 dead links out of 39, caused by three naming conventions coexisting.
+
+The index file gets a stricter check, because it is the one loaded every time: no entry may point at a missing file, and no note may be left out of it.
+
+Two false positives shaped the path detection, both worth knowing if you adapt it. Stopping a path match at the first space breaks every directory named like `02 - Projects`, so matches run to end of line and trailing prose is trimmed back until something on disk answers. And prose that merely mentions a path shape, `C:\...`, is not a path, so a match now requires two real segments.
+
 ## Verifying
 
 ```sh
 python dirmap.py --selftest
 python dupescan.py --selftest
 python secretscan.py --selftest
+python notecheck.py --selftest
 ```
 
 Each builds a temporary tree and asserts on the results, including real git repositories for `dirmap` and `secretscan`. The `secretscan` selftest commits a credential-shaped value, deletes it in a later commit, and checks it is still found: the deleted case is the whole point.
