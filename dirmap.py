@@ -54,7 +54,10 @@ def kind(path):
 
 def git_state(path):
     """Returns (branch, last commit, modified file count), or None if not a repo."""
-    if not os.path.isdir(os.path.join(path, ".git")):
+    # In a worktree or a submodule, .git is a file pointing elsewhere, not a
+    # directory. Checking for a directory hides exactly the checkouts most
+    # likely to be holding uncommitted work.
+    if not os.path.exists(os.path.join(path, ".git")):
         return None
 
     def run(*args):
@@ -75,7 +78,13 @@ def git_state(path):
 
 def pitch(path):
     """First line of prose from the README, to recall what the project is for."""
-    for name in os.listdir(path) if os.path.isdir(path) else []:
+    try:
+        names = os.listdir(path)
+    except OSError:
+        # This walks other people's directories: one unreadable folder must not
+        # take down the whole report.
+        return ""
+    for name in names:
         if name.lower().startswith("readme"):
             try:
                 with open(os.path.join(path, name), encoding="utf-8", errors="replace") as f:
@@ -136,7 +145,11 @@ document.querySelectorAll('th').forEach((th,i)=>th.onclick=()=>{{
 
 def build(root):
     entries = []
-    for name in sorted(os.listdir(root)):
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as err:
+        raise SystemExit(f"cannot read {root}: {err}")
+    for name in names:
         path = os.path.join(root, name)
         if not os.path.isdir(path) or name in SKIP_DIRS:
             continue
@@ -239,6 +252,20 @@ def _selftest():
         assert "first pass" in last, last
         assert dirty == 1, dirty
         assert "first pass" in render(d, build(d))
+
+        # In a worktree .git is a file, not a directory. These are the checkouts
+        # most likely to hold uncommitted work, so they must not read as "no repo".
+        wt = os.path.join(d, "worktree")
+        added = subprocess.run(("git", "-C", repo, "worktree", "add", "-q", wt),
+                               capture_output=True, env=env)
+        if added.returncode == 0:
+            assert os.path.isfile(os.path.join(wt, ".git")), "expected .git to be a file here"
+            wt_state = git_state(wt)
+            assert wt_state is not None, "a worktree must be detected as a repo"
+            assert "first pass" in wt_state[1], wt_state
+
+        # An unreadable directory must not take down the whole report.
+        assert pitch(os.path.join(d, "does-not-exist")) == ""
     print("selftest ok")
 
 

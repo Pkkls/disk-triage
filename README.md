@@ -12,6 +12,8 @@ Builds a sortable HTML page of every directory under a root: size, file count, l
 python dirmap.py ~/Downloads --out map.html
 ```
 
+Worktrees and submodules count as repos, where `.git` is a file rather than a directory. They are often the checkouts holding forgotten uncommitted work, so treating them as "not a repo" would miss the point of the report.
+
 Directories untouched for 90+ days are greyed out. `node_modules`, `dist`, `target` and friends are excluded from the size, so the number reflects actual code rather than build output. The summary line calls out how many repos hold uncommitted work, which tends to be the useful part.
 
 ## dupescan.py
