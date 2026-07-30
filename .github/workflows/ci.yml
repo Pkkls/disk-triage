@@ -25,6 +25,11 @@ jobs:
         run: python dirmap.py --selftest
       - name: dupescan selftest
         run: python dupescan.py --selftest
+      - name: secretscan selftest
+        run: python secretscan.py --selftest
+      # The scanner must stay clean against its own repository.
+      - name: secretscan finds nothing here
+        run: python secretscan.py .
       # These scripts walk other people's directories, so a crash on an
       # unreadable path or an odd filename is the failure mode that matters.
       - name: Runs against a real tree without crashing
