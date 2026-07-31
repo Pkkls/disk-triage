@@ -212,7 +212,9 @@ def _selftest():
             "aws access key": "AKIA" + "E" * 16,
             "slack token": "xoxb-" + "1" * 12,
             "google api key": "AIza" + "f" * 35,
-            "private key block": "-----BEGIN RSA PRIVATE KEY-----",
+            # Assembled rather than written out: a literal here is a real
+            # match, and this file is scanned by its own CI.
+            "private key block": "-----BEGIN RSA " + "PRIVATE KEY" + "-----",
             "discord bot token": "M" + "g" * 23 + "." + "h" * 6 + "." + "i" * 27,
         }
         for label, pattern in PATTERNS.items():

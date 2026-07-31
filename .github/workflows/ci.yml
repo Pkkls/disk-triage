@@ -29,9 +29,13 @@ jobs:
         run: python secretscan.py --selftest
       - name: notecheck selftest
         run: python notecheck.py --selftest
-      # The scanner must stay clean against its own repository.
-      - name: secretscan finds nothing here
-        run: python secretscan.py .
+      # The scanner must stay clean against its own checkout. Deliberately
+      # --head-only: this repository's own test fixtures contain strings shaped
+      # like credentials, so a full-history scan will always match them once
+      # they are committed. What matters on every push is that no secret is
+      # being added now.
+      - name: secretscan finds nothing in the checkout
+        run: python secretscan.py . --head-only
       # These scripts walk other people's directories, so a crash on an
       # unreadable path or an odd filename is the failure mode that matters.
       - name: Runs against a real tree without crashing
