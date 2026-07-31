@@ -20,7 +20,9 @@ import sys
 PATTERNS = {
     "telegram bot token": r"[0-9]{8,10}:AA[A-Za-z0-9_-]{33}",
     "github token": r"gh[pousr]_[A-Za-z0-9]{36}",
-    "openai/anthropic key": r"sk-(?:ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}",
+    # A capturing group, not (?:...). git grep speaks POSIX ERE, where the
+    # non-capturing form is invalid and the whole pattern is rejected.
+    "openai/anthropic key": r"sk-(ant-|or-v1-|proj-)?[A-Za-z0-9_-]{20,}",
     "aws access key": r"AKIA[0-9A-Z]{16}",
     "slack token": r"xox[baprs]-[A-Za-z0-9-]{10,}",
     "google api key": r"AIza[0-9A-Za-z_-]{35}",
@@ -51,14 +53,29 @@ PLACEHOLDER = re.compile(
 )
 
 
-def run(repo, *args, timeout=300):
+class ScanError(Exception):
+    """git could not run the search, which is not the same as finding nothing."""
+
+
+def run(repo, *args, timeout=300, ok_codes=(0,)):
+    """Runs git and refuses to turn a failure into an empty result.
+
+    `git grep` exits 0 when it matches, 1 when it does not, and 2 or more on a
+    real error such as a pattern its regex engine rejects. Collapsing all of
+    those to "" is how a scanner reports "clean" while never having searched:
+    one pattern here used Perl syntax that POSIX ERE rejects, and the tool
+    stayed silent about it through every scan.
+    """
     try:
         out = subprocess.run(
             ("git", "-C", repo) + args,
             capture_output=True, text=True, timeout=timeout, errors="replace",
         )
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    except (OSError, subprocess.SubprocessError) as err:
+        raise ScanError(f"git {' '.join(args[:2])}: {err}") from err
+    if out.returncode not in ok_codes:
+        detail = (out.stderr or "").strip().splitlines()
+        raise ScanError(f"git {args[0]} failed ({out.returncode}): {detail[-1] if detail else '?'}")
     return out.stdout
 
 
@@ -83,7 +100,12 @@ def scan_repo(repo, head_only=False, max_revs=400):
 
     findings, skipped, seen = [], 0, set()
     for label, pattern in PATTERNS.items():
-        for line in run(repo, "grep", "-I", "-n", "-E", pattern, *revs).splitlines():
+        # grep exits 1 when a pattern simply matches nothing; anything higher
+        # is a real failure and must not pass for a clean result.
+        # "-e" is required: the private-key pattern starts with a dash and git
+        # would otherwise parse it as an option and print its own help.
+        for line in run(repo, "grep", "-I", "-n", "-E", "-e", pattern, *revs,
+                        ok_codes=(0, 1)).splitlines():
             # "<rev>:<path>:<lineno>:<content>"
             parts = line.split(":", 3)
             if len(parts) < 4:
@@ -164,6 +186,39 @@ def _selftest():
             subprocess.run(("git", "-C", d) + a, capture_output=True, env=env)
 
         git("init", "-q")
+
+        # Every pattern must be accepted by the engine that actually runs it.
+        # git grep speaks POSIX ERE, Python's re does not, and a pattern valid
+        # here but rejected there made the scanner silently skip a whole class
+        # of credential on every scan it ever performed.
+        open(os.path.join(d, "seed.txt"), "w").write("seed\n")
+        git("add", "-A")
+        git("commit", "-qm", "seed")
+        for label, pattern in PATTERNS.items():
+            proc = subprocess.run(
+                ("git", "-C", d, "grep", "-I", "-n", "-E", "-e", pattern, "HEAD"),
+                capture_output=True, text=True, env=env,
+            )
+            assert proc.returncode in (0, 1), (
+                f"pattern {label!r} is rejected by git grep: {proc.stderr.strip()}"
+            )
+            re.compile(pattern)  # and by Python, used for the boundary pass
+
+        # Each pattern must also match the thing it claims to match.
+        samples = {
+            "telegram bot token": "8446960541:AA" + "b" * 33,
+            "github token": "ghp_" + "c" * 36,
+            "openai/anthropic key": "sk-ant-" + "d" * 30,
+            "aws access key": "AKIA" + "E" * 16,
+            "slack token": "xoxb-" + "1" * 12,
+            "google api key": "AIza" + "f" * 35,
+            "private key block": "-----BEGIN RSA PRIVATE KEY-----",
+            "discord bot token": "M" + "g" * 23 + "." + "h" * 6 + "." + "i" * 27,
+        }
+        for label, pattern in PATTERNS.items():
+            assert label in samples, f"no sample for {label}"
+            assert re.search(pattern, samples[label]), f"{label} does not match its own sample"
+
         # A credential-shaped value, committed then deleted: the point of the tool.
         leaked = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
         with open(os.path.join(d, "config.py"), "w") as f:
