@@ -67,17 +67,31 @@ def git_state(path):
         return None
 
     def run(*args):
+        """Output, or None if git could not answer.
+
+        None and "" are different on purpose. `git status` that returns nothing
+        means a clean tree; `git status` that could not run means nothing is
+        known. Collapsing both to "" made an unreadable repository render as
+        "0 uncommitted", which in a tool used to decide what is safe to delete
+        is the dangerous direction of the mistake.
+        """
         try:
             out = subprocess.run(
                 ("git", "-C", path) + args,
                 capture_output=True, text=True, timeout=15,
             )
         except (OSError, subprocess.SubprocessError):
-            return ""
-        return out.stdout.strip() if out.returncode == 0 else ""
+            return None
+        return out.stdout.strip() if out.returncode == 0 else None
 
     # One call covers branch, upstream tracking and dirty files.
-    status = run("status", "--porcelain=v1", "-b").splitlines()
+    raw_status = run("status", "--porcelain=v1", "-b")
+    if raw_status is None:
+        # Say so rather than describe a repository nobody could read.
+        return {"branch": "?", "last": "", "dirty": None, "ahead": 0,
+                "commits": 0, "has_remote": False, "has_upstream": False,
+                "unreadable": True}
+    status = raw_status.splitlines()
     header = status[0] if status and status[0].startswith("##") else ""
     dirty = len([line for line in status[1:] if line.strip()])
 
@@ -96,23 +110,24 @@ def git_state(path):
             if match:
                 ahead = int(match.group(1))
 
-    has_remote = bool(run("remote"))
+    has_remote = bool(run("remote") or "")
     if not has_upstream:
         # Without an upstream, ahead is not measurable. Counting the whole
         # history as unpushed reads as alarming when the branch may in fact be
         # behind its remote, so only a repo with no remote at all is treated as
         # living solely on this disk.
         ahead = 0
-    commits = run("rev-list", "--count", "HEAD")
+    commits = run("rev-list", "--count", "HEAD") or ""
 
     return {
         "branch": branch,
-        "last": run("log", "-1", "--format=%cs %s")[:90],
+        "last": (run("log", "-1", "--format=%cs %s") or "")[:90],
         "dirty": dirty,
         "ahead": ahead,
         "commits": int(commits) if commits.isdigit() else 0,
         "has_remote": has_remote,
         "has_upstream": has_upstream,
+        "unreadable": False,
     }
 
 
@@ -223,7 +238,11 @@ def render(root, entries):
 
         if git:
             git_cell = html.escape(git["branch"])
-            if git["dirty"]:
+            if git.get("unreadable"):
+                # Never render an unreadable repository as one with nothing to
+                # lose: this table is read to decide what can go.
+                git_cell += ' <span class="risk">git unreadable</span>'
+            elif git["dirty"]:
                 git_cell += f' <span class="dirty">{git["dirty"]} changed</span>'
             at_risk = risk(git)
             if at_risk:
@@ -250,6 +269,7 @@ def render(root, entries):
     stale = sum(1 for e in entries if (now - e[4]) / 86400 > 90)
     gits = [e[5] for e in entries if e[5]]
     dirty = sum(1 for g in gits if g["dirty"])
+    unreadable = sum(1 for g in gits if g.get("unreadable"))
     exposed = [g for g in gits if risk(g)]
     summary = (
         f"{len(entries)} directories, {human(total)} total, "
@@ -257,6 +277,10 @@ def render(root, entries):
         f"{len(exposed)} hold commits that exist nowhere else, "
         f"{stale} untouched for 90+ days (greyed out)."
     )
+    # A repository nobody could read is not a repository with nothing in it,
+    # and the counts above would otherwise quietly file it under clean.
+    if unreadable:
+        summary += f" {unreadable} could not be read and are counted in neither."
     return PAGE.format(title=html.escape(root), summary=summary, rows="\n".join(rows))
 
 
@@ -316,6 +340,25 @@ def _selftest():
         assert state["has_remote"] is False, state
         assert risk(state) == ("no remote", 1), risk(state)
         assert "first pass" in render(d, build(d))
+
+        # Un depot que git ne peut pas lire ne doit jamais compter comme propre :
+        # cette table sert a decider ce qu'on supprime, et "0 changed" est
+        # exactement le mensonge qui coute du travail. On simule l'echec en
+        # rendant `git` introuvable pour la duree de l'appel.
+        real_run = subprocess.run
+        try:
+            subprocess.run = lambda *a, **k: (_ for _ in ()).throw(OSError("git absent"))
+            blind = git_state(repo)
+        finally:
+            subprocess.run = real_run
+        assert blind is not None, "un .git present doit toujours donner un etat"
+        assert blind["unreadable"] is True, blind
+        assert blind["dirty"] is None, f"un depot illisible affiche {blind['dirty']} modifications"
+        assert blind["branch"] == "?", blind
+        page_blind = render(d, [(os.path.basename(repo), "python", 1, 1, time.time(), blind, "")])
+        assert "git unreadable" in page_blind, "l'illisibilite doit se voir dans la page"
+        assert "0 changed" not in page_blind, page_blind
+
 
         # With a remote and everything pushed, nothing is at risk.
         origin = os.path.join(d, "origin.git")
