@@ -27,6 +27,8 @@ jobs:
         run: python dupescan.py --selftest
       - name: secretscan selftest
         run: python secretscan.py --selftest
+      - name: errorguard selftest
+        run: python errorguard.py --selftest
       - name: notecheck selftest
         run: python notecheck.py --selftest
       # The scanner must stay clean against its own checkout. Deliberately
