@@ -7,7 +7,12 @@ Matched values are never printed in full. Placeholders are recognised and
 counted separately, because a scanner that cries wolf is a scanner nobody runs.
 
 Usage: python secretscan.py [repo ...] [--head-only] [--quiet]
-Exit code is 1 when something real is found, so it fits a pre-push hook.
+Exit code is 1 when something real is found, 2 when a scan could not run.
+
+Run over its own repository's full history this reports one finding: a fake
+private key its selftest once committed. HEAD is clean, the key is invented,
+and the alternative would be a suppression list, which is a mechanism for
+hiding real findings. Left visible on purpose.
 """
 import argparse
 import os
@@ -90,13 +95,22 @@ def is_placeholder(value, path):
 
 
 def scan_repo(repo, head_only=False, max_revs=400):
-    """Returns (findings, placeholders_skipped, revisions_scanned)."""
+    """Returns (findings, placeholders_skipped, revisions_scanned, revisions_total)."""
     if not os.path.exists(os.path.join(repo, ".git")):
-        return None, 0, 0
+        return None, 0, 0, 0
 
-    revs = ["HEAD"] if head_only else [
-        r for r in run(repo, "rev-list", "--all").split() if r
-    ][:max_revs] or ["HEAD"]
+    if head_only:
+        revs, available = ["HEAD"], 1
+    else:
+        # The cap has to be visible. Scanning 400 of 1200 revisions and printing
+        # "400 revisions" alongside "no credentials found" reads exactly like a
+        # complete scan, and the two thirds nobody looked at are the older
+        # commits, which is where a rotated credential is most likely to sit.
+        # No repository here is anywhere near the cap today; this is so the
+        # report cannot start lying quietly on the day one is.
+        allrevs = [r for r in run(repo, "rev-list", "--all").split() if r]
+        available = len(allrevs)
+        revs = allrevs[:max_revs] or ["HEAD"]
 
     findings, skipped, seen = [], 0, set()
     for label, pattern in PATTERNS.items():
@@ -138,7 +152,7 @@ def scan_repo(repo, head_only=False, max_revs=400):
                 "path": path, "line": "-", "masked": "",
             })
 
-    return findings, skipped, len(revs)
+    return findings, skipped, len(revs), available
 
 
 def main():
@@ -150,13 +164,20 @@ def main():
 
     total = 0
     unreadable = 0
+    truncated = 0
     for repo in args.repos or ["."]:
-        findings, skipped, revs = scan_repo(repo, args.head_only)
+        findings, skipped, revs, available = scan_repo(repo, args.head_only)
         if findings is None:
             # Staying silent here would let a pre-push hook pass on a typo.
             print(f"{repo}: not a git repository", file=sys.stderr)
             unreadable += 1
             continue
+        if not args.head_only and available > revs:
+            truncated += 1
+            # On stderr so it survives --quiet: a partial scan must never be
+            # able to look like a complete one, whatever the output mode.
+            print(f"{repo}: scanned {revs} of {available} revisions, "
+                  f"{available - revs} NOT searched", file=sys.stderr)
         if not args.quiet:
             note = f", {skipped} placeholders ignored" if skipped else ""
             print(f"{os.path.abspath(repo)}: {revs} revisions{note}")
@@ -233,10 +254,10 @@ def _selftest():
         git("add", "-A")
         git("commit", "-qm", "move to env")
 
-        head_findings, _, _ = scan_repo(d, head_only=True)
+        head_findings, _, _, _ = scan_repo(d, head_only=True)
         assert head_findings == [], "the checkout is clean, that is the trap"
 
-        findings, _, _ = scan_repo(d)
+        findings, _, _, _ = scan_repo(d)
         assert len(findings) == 1, findings
         assert findings[0]["kind"] == "github token", findings
         assert leaked not in str(findings), "the secret must never be reproduced in full"
@@ -248,7 +269,7 @@ def _selftest():
             f.write("OPENAI_API_KEY=sk-your-key-here-000000000000\n")
         git("add", "-A")
         git("commit", "-qm", "document the env")
-        findings, skipped, _ = scan_repo(d)
+        findings, skipped, _, _ = scan_repo(d)
         assert len(findings) == 1, f"placeholders leaked into the report: {findings}"
         assert skipped >= 1, "placeholders should be counted"
 
@@ -257,7 +278,7 @@ def _selftest():
             f.write("NOTHING_SECRET_LOOKING=1\n")
         git("add", "-f", ".env")
         git("commit", "-qm", "add env")
-        findings, _, _ = scan_repo(d)
+        findings, _, _, _ = scan_repo(d)
         kinds = [f["kind"] for f in findings]
         assert "sensitive file committed" in kinds, kinds
         assert sum(1 for k in kinds if k == "sensitive file committed") == 1, kinds
@@ -269,13 +290,13 @@ def _selftest():
                     'MzIm2R1c2VyX2lkPTEwMDAxIn0.aBcDeF.gHiJkLmNoPqRsTuVwXyZ012345"}\n')
         git("add", "-A")
         git("commit", "-qm", "add a capture fixture")
-        findings, _, _ = scan_repo(d)
+        findings, _, _, _ = scan_repo(d)
         assert not any(f["kind"] == "discord bot token" for f in findings), \
             f"matched inside a base64 blob: {findings}"
 
     # A path that is not a repository must be loud, not silently clean.
     with tempfile.TemporaryDirectory() as empty:
-        findings, _, _ = scan_repo(empty)
+        findings, _, _, _ = scan_repo(empty)
         assert findings is None, "a non-repo must be reported as unscannable"
 
     print("selftest ok")
