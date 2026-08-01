@@ -42,3 +42,7 @@ jobs:
         run: |
           python dirmap.py . --out map.html
           python dupescan.py . --min-mb 0.001
+      - name: Les liens publies menent quelque part
+        run: python test_linkcheck.py
+      - name: Aucun lien casse dans la documentation
+        run: python linkcheck.py README.md
