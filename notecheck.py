@@ -57,16 +57,25 @@ def slug_for(filename):
 
 
 def read_notes(directory):
-    notes = {}
+    """Returns (notes, unreadable).
+
+    Une note illisible etait sautee en silence. Elle disparaissait du compte,
+    des liens, et surtout du scan d'identifiants : un fichier verrouille
+    contenant un token produisait "clean" et un code de sortie 0. L'outil
+    annoncait un resultat sur un perimetre plus petit que celui demande, sans
+    le dire, ce qui est la meme collapse que partout ailleurs ici. Ce que l'on
+    n'a pas pu lire ne peut pas etre declare sain.
+    """
+    notes, unreadable = {}, []
     for name in sorted(os.listdir(directory)):
         if not name.endswith(".md"):
             continue
         try:
             with open(os.path.join(directory, name), encoding="utf-8", errors="replace") as f:
                 notes[name] = f.read()
-        except OSError:
-            continue
-    return notes
+        except OSError as err:
+            unreadable.append(f"{name}: {err.strerror or err}")
+    return notes, unreadable
 
 
 def declared_name(text):
@@ -75,8 +84,8 @@ def declared_name(text):
 
 
 def audit(directory, index_name="MEMORY.md"):
-    notes = read_notes(directory)
-    if not notes:
+    notes, unreadable = read_notes(directory)
+    if not notes and not unreadable:
         return None
 
     problems = {"names": [], "links": [], "paths": [], "secrets": [], "index": []}
@@ -121,7 +130,8 @@ def audit(directory, index_name="MEMORY.md"):
             if filename != index_name and filename not in listed:
                 problems["index"].append(("not indexed", filename))
 
-    return {"notes": notes, "problems": problems, "names": names}
+    return {"notes": notes, "problems": problems, "names": names,
+            "unreadable": unreadable}
 
 
 def main():
@@ -160,9 +170,19 @@ def main():
     for kind, item in p["index"]:
         print(f"  index {kind:12} {item}")
 
+    # Sur stderr pour survivre a --quiet, et avant le verdict : un perimetre
+    # ampute ne doit jamais pouvoir ressembler a un scan complet.
+    for entry in result["unreadable"]:
+        print(f"  UNREADABLE      {entry}", file=sys.stderr)
+
     if total:
         print(f"\n{total} problem(s)")
         return 1
+    if result["unreadable"]:
+        # Ni "clean" ni un probleme trouve : on n'a pas pu regarder.
+        print(f"{len(result['unreadable'])} note(s) illisible(s), "
+              f"perimetre incomplet", file=sys.stderr)
+        return 2
     if not args.quiet:
         print("clean")
     return 0

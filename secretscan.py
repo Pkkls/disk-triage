@@ -166,7 +166,18 @@ def main():
     unreadable = 0
     truncated = 0
     for repo in args.repos or ["."]:
-        findings, skipped, revs, available = scan_repo(repo, args.head_only)
+        try:
+            findings, skipped, revs, available = scan_repo(repo, args.head_only)
+        except ScanError as err:
+            # Un depot sans aucun commit, ou dont les objets sont illisibles,
+            # faisait remonter l'exception jusqu'en haut. Python sort alors
+            # avec 1, qui est precisement le code documente pour "identifiant
+            # trouve". Un appelant qui aiguille sur le code de sortie partait
+            # donc chercher une fuite a chaque plantage, et surtout le code 2,
+            # "je n'ai pas pu scanner", ne sortait jamais dans ce cas.
+            print(f"{repo}: {err}", file=sys.stderr)
+            unreadable += 1
+            continue
         if findings is None:
             # Staying silent here would let a pre-push hook pass on a typo.
             print(f"{repo}: not a git repository", file=sys.stderr)
